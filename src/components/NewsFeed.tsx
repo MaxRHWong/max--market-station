@@ -19,6 +19,7 @@ export function NewsFeed({ lang }: { lang: Language }) {
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string>("");
   
   const lastFetchRef = useRef<number>(0);
 
@@ -27,16 +28,19 @@ export function NewsFeed({ lang }: { lang: Language }) {
 
     const translateNews = async (items: NewsItem[]) => {
       if (items.length === 0) return items;
+      // If items are already in Chinese (mock data), don't translate
+      if (items[0].id.startsWith('m')) return items;
+      
       if (isMounted) setIsTranslating(true);
       
       try {
-        // Try multiple ways to get the API key
         const apiKey = process.env.GEMINI_API_KEY || 
                       (import.meta as any).env?.VITE_GEMINI_API_KEY ||
-                      (window as any).GEMINI_API_KEY;
+                      (window as any).GEMINI_API_KEY ||
+                      (window as any).process?.env?.GEMINI_API_KEY;
 
         if (!apiKey) {
-          console.warn("Translation skipped: GEMINI_API_KEY not found in environment");
+          console.warn("Translation skipped: No API Key found in Vercel/Local env");
           return items;
         }
 
@@ -45,8 +49,8 @@ export function NewsFeed({ lang }: { lang: Language }) {
         
         const prompt = `You are a professional financial translator. 
 Translate these cryptocurrency news titles into Simplified Chinese.
-Keep terms like "ETF", "SEC", "Web3", "Bitcoin", "Ethereum", "Solana", "Inflow", "Outflow" in English if they are standard in Chinese crypto media.
-Return ONLY a JSON array of strings. No extra text.
+Keep terms like "ETF", "SEC", "Web3", "Bitcoin", "Ethereum", "Solana", "Inflow", "Outflow" in English.
+Return ONLY a JSON array of strings.
 
 Titles:
 ${titlesToTranslate}`;
@@ -54,19 +58,12 @@ ${titlesToTranslate}`;
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING }
-            }
-          }
+          config: { responseMimeType: "application/json" }
         });
 
         const text = response.text;
         if (text) {
           try {
-            // More robust JSON extraction
             const jsonMatch = text.match(/\[[\s\S]*\]/);
             const jsonStr = jsonMatch ? jsonMatch[0] : text;
             const translatedTitles = JSON.parse(jsonStr);
@@ -77,16 +74,8 @@ ${titlesToTranslate}`;
                 title: String(translatedTitles[i]).trim()
               }));
             }
-          } catch (parseError) {
-            console.error("JSON parse failed, attempting regex extraction", parseError);
-            const matches = text.match(/"([^"]+)"/g);
-            if (matches && matches.length >= items.length) {
-              const extracted = matches.slice(0, items.length).map(m => m.replace(/^"|"$/g, ''));
-              return items.map((item, i) => ({
-                ...item,
-                title: extracted[i].trim()
-              }));
-            }
+          } catch (e) {
+            console.error("Translation parse error:", e);
           }
         }
       } catch (e) {
@@ -99,7 +88,7 @@ ${titlesToTranslate}`;
 
     const fetchNews = async (isInitial = false) => {
       const now = Date.now();
-      if (!isInitial && now - lastFetchRef.current < 15000) return;
+      if (!isInitial && now - lastFetchRef.current < 10000) return;
       lastFetchRef.current = now;
 
       if (isInitial && isMounted) setLoading(true);
@@ -107,48 +96,54 @@ ${titlesToTranslate}`;
       
       let fetchedNews: NewsItem[] = [];
 
-      // 1. Try Primary Source (CryptoCompare)
-      try {
-        const res = await fetch(`https://min-api.cryptocompare.com/data/v2/news/?lang=EN&extraParams=MaxMarketStation&t=${Date.now()}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.Type === 1 && Array.isArray(data.Data) && data.Data.length > 0) {
-            fetchedNews = data.Data.map((item: any) => ({
-              id: item.id,
-              title: item.title,
-              source_info: { name: item.source_info?.name || item.source || "CryptoNews" },
-              published_on: item.published_on
-            })).slice(0, 15);
+      // 1. Try Primary Source (CryptoCompare) with multiple endpoints
+      console.log("Fetching live news...");
+      const endpoints = [
+        `https://min-api.cryptocompare.com/data/v2/news/?lang=EN&t=${Date.now()}`,
+        `https://min-api.cryptocompare.com/data/v2/news/?lang=EN&extraParams=MaxMarketStation`
+      ];
+
+      for (const url of endpoints) {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.Data && data.Data.length > 0) {
+              console.log("Live news fetch success from CryptoCompare");
+              fetchedNews = data.Data.map((item: any) => ({
+                id: String(item.id),
+                title: item.title,
+                source_info: { name: item.source_info?.name || item.source || "CryptoNews" },
+                published_on: item.published_on
+              })).slice(0, 15);
+              break; // Success
+            }
           }
+        } catch (e) {
+          console.warn(`Fetch from ${url} failed:`, e);
         }
-      } catch (e) {
-        console.warn("Primary news source failed:", e);
       }
 
-      // 2. Try Gemini Fallback if primary failed or returned nothing
+      // 2. Try Gemini Fallback
       if (fetchedNews.length === 0) {
         try {
           const apiKey = process.env.GEMINI_API_KEY || 
                         (import.meta as any).env?.VITE_GEMINI_API_KEY ||
                         (window as any).GEMINI_API_KEY;
           if (apiKey) {
+            console.log("Attempting Gemini news fallback...");
             const ai = new GoogleGenAI({ apiKey });
-            const prompt = `Provide 10 real, very recent cryptocurrency news items from the last 24 hours. 
-Today is ${new Date().toISOString()}.
-Return a JSON array of objects: { "id": string, "title": string, "source": string, "timestamp": number }.
-Provide titles in English.`;
-            
+            const prompt = `Provide 10 real, very recent cryptocurrency news items from the last 24 hours. Today is ${new Date().toLocaleString()}. Return JSON array of {id, title, source, timestamp}. English titles.`;
             const response = await ai.models.generateContent({
               model: "gemini-3-flash-preview",
               contents: prompt,
               config: { responseMimeType: "application/json" }
             });
-
             if (response.text) {
               const data = JSON.parse(response.text);
-              if (Array.isArray(data) && data.length > 0) {
+              if (Array.isArray(data)) {
                 fetchedNews = data.map((item: any) => ({
-                  id: item.id || Math.random().toString(36).substr(2, 9),
+                  id: String(item.id || Math.random()),
                   title: item.title,
                   source_info: { name: item.source || "Global News" },
                   published_on: item.timestamp || Math.floor(Date.now() / 1000)
@@ -157,42 +152,29 @@ Provide titles in English.`;
             }
           }
         } catch (e) {
-          console.error("Gemini news fallback failed:", e);
+          console.error("Gemini fallback failed:", e);
         }
       }
 
-      // 3. Final Fallback: Static Mock News
+      // 3. Final Fallback: Static Mock News (Only if absolutely necessary)
       if (fetchedNews.length === 0) {
+        console.log("Using static mock news as final fallback");
         fetchedNews = lang === 'zh' ? MOCK_NEWS_ZH : MOCK_NEWS_EN;
       }
 
-      // 4. Update State and Translate if needed
       if (isMounted) {
-        if (fetchedNews.length > 0) {
-          setNews(fetchedNews);
-          setLoading(false);
-          
-          if (lang === 'zh') {
-            const translated = await translateNews(fetchedNews);
-            if (isMounted) {
-              setNews(translated);
-              setIsRefreshing(false);
-            }
-          } else {
+        setNews(fetchedNews);
+        setLoading(false);
+        setLastUpdated(new Date().toLocaleTimeString());
+        
+        if (lang === 'zh' && fetchedNews.length > 0) {
+          const translated = await translateNews(fetchedNews);
+          if (isMounted) {
+            setNews(translated);
             setIsRefreshing(false);
           }
         } else {
-          setLoading(false);
           setIsRefreshing(false);
-          // Only show error if we have absolutely NO news at all
-          if (news.length === 0) {
-            setNews([{
-              id: "error",
-              title: lang === 'zh' ? "无法获取实时新闻，请检查网络连接" : "Unable to fetch live news. Please check your connection.",
-              source_info: { name: "SYSTEM" },
-              published_on: Math.floor(Date.now() / 1000)
-            }]);
-          }
         }
       }
     };
@@ -300,6 +282,11 @@ Provide titles in English.`;
             </motion.div>
           </button>
           <div className="flex items-center gap-3">
+            {lastUpdated && (
+              <span className="hidden sm:inline font-mono text-[9px] text-white/30 uppercase tracking-widest">
+                Last_Sync: {lastUpdated}
+              </span>
+            )}
             <div className="hidden sm:flex items-center gap-1.5">
               <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
               <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
