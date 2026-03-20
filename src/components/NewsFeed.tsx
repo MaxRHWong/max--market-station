@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import { useEffect, useState, useRef } from "react";
+import { Activity } from "lucide-react";
 import { translations, Language } from "../lib/i18n";
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -16,166 +17,196 @@ export function NewsFeed({ lang }: { lang: Language }) {
   const t = translations[lang];
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   
-  // Keep track of the mock news state across renders to simulate a real live feed
-  const mockNewsRef = useRef<NewsItem[]>([]);
+  const lastFetchRef = useRef<number>(0);
 
   useEffect(() => {
     let isMounted = true;
-    
-    // Initialize mock news if empty
-    if (mockNewsRef.current.length === 0) {
-      mockNewsRef.current = lang === 'zh' ? [...MOCK_NEWS_ZH] : [...MOCK_NEWS_EN];
-      // Adjust initial timestamps to be recent
-      mockNewsRef.current = mockNewsRef.current.map((item, index) => ({
-        ...item,
-        published_on: Math.floor(Date.now() / 1000) - (index * 180)
-      }));
-    } else {
-      // If language changed, swap the base templates but keep the "live" feel
-      const templates = lang === 'zh' ? MOCK_NEWS_ZH : MOCK_NEWS_EN;
-      mockNewsRef.current = mockNewsRef.current.map((item, index) => ({
-        ...item,
-        title: templates[index % templates.length].title,
-        source_info: templates[index % templates.length].source_info
-      }));
-    }
 
-    const fetchNewsWithGemini = async (l: string) => {
+    const translateNews = async (items: NewsItem[]) => {
+      if (items.length === 0) return items;
+      if (isMounted) setIsTranslating(true);
+      
       try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) return null;
+        // Try multiple ways to get the API key
+        const apiKey = process.env.GEMINI_API_KEY || 
+                      (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+                      (window as any).GEMINI_API_KEY;
+
+        if (!apiKey) {
+          console.warn("Translation skipped: GEMINI_API_KEY not found in environment");
+          return items;
+        }
 
         const ai = new GoogleGenAI({ apiKey });
+        const titlesToTranslate = items.map((item, i) => `[${i}] ${item.title}`).join('\n');
         
-        // Use a slightly simpler prompt and handle potential tool errors
-        const prompt = `Get the 10 most recent cryptocurrency and global financial news items in ${l === 'zh' ? 'Chinese' : 'English'}. 
-Return a JSON array of objects with: id, title, source, timestamp (Unix seconds). Ensure timestamps are accurate for today.`;
+        const prompt = `You are a professional financial translator. 
+Translate these cryptocurrency news titles into Simplified Chinese.
+Keep terms like "ETF", "SEC", "Web3", "Bitcoin", "Ethereum", "Solana", "Inflow", "Outflow" in English if they are standard in Chinese crypto media.
+Return ONLY a JSON array of strings. No extra text.
 
-        try {
-          const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: prompt,
-            config: {
-              tools: [{ googleSearch: {} }],
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    title: { type: Type.STRING },
-                    source: { type: Type.STRING },
-                    timestamp: { type: Type.NUMBER },
-                  },
-                  required: ["id", "title", "source", "timestamp"],
-                },
-              },
-            },
-          });
+Titles:
+${titlesToTranslate}`;
 
-          if (response.text) {
-            const data = JSON.parse(response.text);
-            if (Array.isArray(data)) {
-              return data.map((item: any) => ({
-                id: item.id || Math.random().toString(36).substr(2, 9),
-                title: item.title,
-                source_info: { name: item.source },
-                published_on: item.timestamp || Math.floor(Date.now() / 1000),
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          }
+        });
+
+        const text = response.text;
+        if (text) {
+          try {
+            // More robust JSON extraction
+            const jsonMatch = text.match(/\[[\s\S]*\]/);
+            const jsonStr = jsonMatch ? jsonMatch[0] : text;
+            const translatedTitles = JSON.parse(jsonStr);
+            
+            if (Array.isArray(translatedTitles) && translatedTitles.length >= items.length) {
+              return items.map((item, i) => ({
+                ...item,
+                title: String(translatedTitles[i]).trim()
+              }));
+            }
+          } catch (parseError) {
+            console.error("JSON parse failed, attempting regex extraction", parseError);
+            const matches = text.match(/"([^"]+)"/g);
+            if (matches && matches.length >= items.length) {
+              const extracted = matches.slice(0, items.length).map(m => m.replace(/^"|"$/g, ''));
+              return items.map((item, i) => ({
+                ...item,
+                title: extracted[i].trim()
               }));
             }
           }
-        } catch (innerError: any) {
-          // If googleSearch tool fails (common in some environments), try without it
-          if (innerError?.message?.includes('Rpc failed') || innerError?.message?.includes('googleSearch')) {
-            const simpleResponse = await ai.models.generateContent({
+        }
+      } catch (e) {
+        console.error("Translation service error:", e);
+      } finally {
+        if (isMounted) setIsTranslating(false);
+      }
+      return items;
+    };
+
+    const fetchNews = async (isInitial = false) => {
+      const now = Date.now();
+      if (!isInitial && now - lastFetchRef.current < 15000) return;
+      lastFetchRef.current = now;
+
+      if (isInitial && isMounted) setLoading(true);
+      if (isMounted) setIsRefreshing(true);
+      
+      let fetchedNews: NewsItem[] = [];
+
+      // 1. Try Primary Source (CryptoCompare)
+      try {
+        const res = await fetch(`https://min-api.cryptocompare.com/data/v2/news/?lang=EN&extraParams=MaxMarketStation&t=${Date.now()}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.Type === 1 && Array.isArray(data.Data) && data.Data.length > 0) {
+            fetchedNews = data.Data.map((item: any) => ({
+              id: item.id,
+              title: item.title,
+              source_info: { name: item.source_info?.name || item.source || "CryptoNews" },
+              published_on: item.published_on
+            })).slice(0, 15);
+          }
+        }
+      } catch (e) {
+        console.warn("Primary news source failed:", e);
+      }
+
+      // 2. Try Gemini Fallback if primary failed or returned nothing
+      if (fetchedNews.length === 0) {
+        try {
+          const apiKey = process.env.GEMINI_API_KEY || 
+                        (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+                        (window as any).GEMINI_API_KEY;
+          if (apiKey) {
+            const ai = new GoogleGenAI({ apiKey });
+            const prompt = `Provide 10 real, very recent cryptocurrency news items from the last 24 hours. 
+Today is ${new Date().toISOString()}.
+Return a JSON array of objects: { "id": string, "title": string, "source": string, "timestamp": number }.
+Provide titles in English.`;
+            
+            const response = await ai.models.generateContent({
               model: "gemini-3-flash-preview",
               contents: prompt,
-              config: {
-                responseMimeType: "application/json",
-              }
+              config: { responseMimeType: "application/json" }
             });
-            if (simpleResponse.text) {
-              const data = JSON.parse(simpleResponse.text);
-              if (Array.isArray(data)) {
-                return data.map((item: any) => ({
+
+            if (response.text) {
+              const data = JSON.parse(response.text);
+              if (Array.isArray(data) && data.length > 0) {
+                fetchedNews = data.map((item: any) => ({
                   id: item.id || Math.random().toString(36).substr(2, 9),
                   title: item.title,
-                  source_info: { name: item.source },
-                  published_on: item.timestamp || Math.floor(Date.now() / 1000),
+                  source_info: { name: item.source || "Global News" },
+                  published_on: item.timestamp || Math.floor(Date.now() / 1000)
                 }));
               }
             }
           }
-          throw innerError;
-        }
-      } catch (e) {
-        // Silent fallback to other APIs, don't log the full RPC error to avoid user alarm
-        console.warn("Gemini news fetch unavailable, falling back to secondary sources.");
-        return null;
-      }
-      return null;
-    };
-
-    const fetchNews = async (isInitial = false) => {
-      if (isInitial && isMounted) setLoading(true);
-      
-      const tryFetchCryptoCompare = async (l: string) => {
-        try {
-          const res = await fetch(`https://min-api.cryptocompare.com/data/v2/news/?lang=${l}&t=${Date.now()}`);
-          if (!res.ok) return null;
-          const data = await res.json();
-          if (data && data.Data && Array.isArray(data.Data) && data.Data.length > 0) {
-            return data.Data.sort((a: any, b: any) => b.published_on - a.published_on).slice(0, 20);
-          }
         } catch (e) {
-          console.error("CryptoCompare fetch error:", e);
-          return null;
-        }
-        return null;
-      };
-
-      // Try CryptoCompare first as it's much faster and has real timestamps
-      let newsData = await tryFetchCryptoCompare(lang === 'zh' ? 'ZH' : 'EN');
-      
-      // If ZH is empty or fails, try Gemini for ZH specifically
-      if ((!newsData || newsData.length === 0) && lang === 'zh') {
-        newsData = await fetchNewsWithGemini('zh');
-      }
-
-      // If still empty, try Gemini EN or CryptoCompare EN
-      if (!newsData || newsData.length === 0) {
-        newsData = await tryFetchCryptoCompare('EN');
-        if (!newsData || newsData.length === 0) {
-          newsData = await fetchNewsWithGemini('en');
-        }
-      }
-      
-      if (newsData && newsData.length > 0) {
-        if (isMounted) setNews(newsData);
-      } else {
-        // Final fallback to mock data if all APIs fail
-        if (isMounted) {
-          const templates = lang === 'zh' ? MOCK_NEWS_ZH : MOCK_NEWS_EN;
-          const baseTime = Math.floor(Date.now() / 1000);
-          const realisticMock = templates.map((item, index) => ({
-            ...item,
-            published_on: baseTime - (index * 600 + Math.floor(Math.random() * 300)) // More realistic intervals (10-15 mins)
-          }));
-          setNews(realisticMock);
+          console.error("Gemini news fallback failed:", e);
         }
       }
 
-      if (isInitial && isMounted) setLoading(false);
+      // 3. Final Fallback: Static Mock News
+      if (fetchedNews.length === 0) {
+        fetchedNews = lang === 'zh' ? MOCK_NEWS_ZH : MOCK_NEWS_EN;
+      }
+
+      // 4. Update State and Translate if needed
+      if (isMounted) {
+        if (fetchedNews.length > 0) {
+          setNews(fetchedNews);
+          setLoading(false);
+          
+          if (lang === 'zh') {
+            const translated = await translateNews(fetchedNews);
+            if (isMounted) {
+              setNews(translated);
+              setIsRefreshing(false);
+            }
+          } else {
+            setIsRefreshing(false);
+          }
+        } else {
+          setLoading(false);
+          setIsRefreshing(false);
+          // Only show error if we have absolutely NO news at all
+          if (news.length === 0) {
+            setNews([{
+              id: "error",
+              title: lang === 'zh' ? "无法获取实时新闻，请检查网络连接" : "Unable to fetch live news. Please check your connection.",
+              source_info: { name: "SYSTEM" },
+              published_on: Math.floor(Date.now() / 1000)
+            }]);
+          }
+        }
+      }
     };
 
     fetchNews(true);
-    const interval = setInterval(() => fetchNews(false), 120000); // 2 minute updates for faster refresh
+    const interval = setInterval(() => fetchNews(false), 180000); // 3 minute updates
+
+    const handleManualRefresh = () => fetchNews(false);
+    window.addEventListener('refresh-news', handleManualRefresh);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
+      window.removeEventListener('refresh-news', handleManualRefresh);
     };
   }, [lang]);
 
@@ -186,9 +217,18 @@ Return a JSON array of objects with: id, title, source, timestamp (Unix seconds)
     
     if (diffSeconds < 60) return lang === 'zh' ? '刚刚' : 'Just now';
     if (diffSeconds < 3600) return lang === 'zh' ? `${Math.floor(diffSeconds / 60)}分钟前` : `${Math.floor(diffSeconds / 60)}m ago`;
-    if (diffSeconds < 86400) return lang === 'zh' ? `${Math.floor(diffSeconds / 3600)}小时前` : `${Math.floor(diffSeconds / 3600)}h ago`;
+    if (diffSeconds < 86400) {
+      const hours = Math.floor(diffSeconds / 3600);
+      return lang === 'zh' ? `${hours}小时前` : `${hours}h ago`;
+    }
     
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    return date.toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
   };
 
   const getSourceColor = (sourceName: string) => {
@@ -219,55 +259,82 @@ Return a JSON array of objects with: id, title, source, timestamp (Unix seconds)
       {/* Scanning Line */}
       <motion.div 
         animate={{ top: ["0%", "100%"] }}
-        transition={{ duration: 12, repeat: Infinity, ease: "linear" }}
+        transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
         className="absolute inset-x-0 h-[1px] bg-[#00ff66]/10 z-0 pointer-events-none"
       />
       
-      <div className="flex items-center justify-between border-b border-white/10 bg-[#0a0a0a] px-4 py-3 sticky top-0 z-10">
-        <div className="flex items-center gap-2">
-          <div className="relative h-2 w-2">
+      <div className="flex items-center justify-between border-b border-white/10 bg-[#0a0a0a] px-6 py-4 sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="relative h-2.5 w-2.5">
             <div className="absolute inset-0 rounded-full bg-[#00ff66] animate-ping opacity-75" />
-            <div className="relative h-2 w-2 rounded-full bg-[#00ff66]" />
+            <div className="relative h-2.5 w-2.5 rounded-full bg-[#00ff66] shadow-[0_0_8px_#00ff66]" />
           </div>
-          <h2 className="font-display text-sm md:text-base font-bold uppercase tracking-[0.2em] text-white">
+          <h2 className="font-display text-base font-black uppercase tracking-[0.25em] text-white">
             {t.latestNews}
           </h2>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden sm:flex items-center gap-1.5">
-            <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
-            <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
-            <span className="h-1 w-1 rounded-full bg-[#00ff66]" />
+        <div className="flex items-center gap-4">
+          {isRefreshing && (
+            <motion.span 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="font-mono text-[9px] text-[#00ff66] uppercase tracking-[0.2em] animate-pulse"
+            >
+              {isTranslating ? (lang === 'zh' ? '正在翻译...' : 'Translating...') : 'Syncing...'}
+            </motion.span>
+          )}
+          <button 
+            onClick={() => {
+              // Trigger a fresh fetch
+              lastFetchRef.current = 0; 
+              window.dispatchEvent(new CustomEvent('refresh-news'));
+            }}
+            className="p-1.5 border border-white/10 hover:border-[#00ff66]/50 hover:text-[#00ff66] transition-all text-white/40"
+            title="Refresh News"
+          >
+            <motion.div
+              animate={isRefreshing ? { rotate: 360 } : {}}
+              transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+            >
+              <Activity className="h-3 w-3" />
+            </motion.div>
+          </button>
+          <div className="flex items-center gap-3">
+            <div className="hidden sm:flex items-center gap-1.5">
+              <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
+              <span className="h-1 w-1 rounded-full bg-[#00ff66]/40" />
+              <span className="h-1 w-1 rounded-full bg-[#00ff66]" />
+            </div>
+            <span className="text-[9px] font-mono text-[#00ff66]/60 uppercase tracking-widest">
+              Terminal_Active
+            </span>
           </div>
-          <span className="text-[9px] font-mono text-[#00ff66] uppercase tracking-widest animate-pulse">
-            Terminal_Active
-          </span>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar p-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] bg-opacity-5">
-        <div className="flex flex-col">
+      <div className="flex-1 overflow-y-auto custom-scrollbar bg-black/20">
+        <div className="flex flex-col divide-y divide-white/5">
           {news.map((item, index) => {
             const sourceColorClass = getSourceColor(item.source_info?.name || 'News');
             return (
               <motion.div
                 key={item.id}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
                 transition={{ 
                   duration: 0.4,
-                  delay: index * 0.05,
-                  ease: [0.215, 0.61, 0.355, 1]
+                  delay: index * 0.03,
+                  ease: "easeOut"
                 }}
-                className="group relative flex gap-4 border-b border-white/5 hover:bg-[#00ff66]/[0.02] p-4 transition-all duration-300"
+                className="group relative flex gap-6 p-6 transition-all duration-300 hover:bg-white/[0.03]"
               >
                 <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-[#00ff66] scale-y-0 group-hover:scale-y-100 transition-transform origin-top duration-300" />
                 
-                <div className="flex flex-col items-end gap-1 shrink-0 pt-1 w-14">
-                  <div className="font-mono text-[10px] text-[#00ff66] opacity-60 group-hover:opacity-100 transition-opacity">
+                <div className="flex flex-col items-center gap-1 shrink-0 pt-1 w-16">
+                  <div className="font-mono text-[10px] font-bold text-[#00ff66] tracking-tighter">
                     {formatTime(item.published_on)}
                   </div>
-                  <div className="h-[1px] w-4 bg-white/10 group-hover:w-8 group-hover:bg-[#00ff66]/30 transition-all" />
+                  <div className="h-[1px] w-4 bg-white/10 group-hover:w-8 group-hover:bg-[#00ff66]/40 transition-all" />
                 </div>
 
                 <div className="flex flex-col gap-2 w-full">
@@ -313,151 +380,17 @@ Return a JSON array of objects with: id, title, source, timestamp (Unix seconds)
 }
 
 const MOCK_NEWS_EN: NewsItem[] = [
-  {
-    id: "1",
-    title: "Bitcoin Surges Past $70,000 as Institutional Adoption Accelerates Globally",
-    source_info: { name: "Bloomberg" },
-    published_on: Date.now() / 1000 - 120,
-  },
-  {
-    id: "2",
-    title: "Ethereum Foundation Announces Next Major Network Upgrade Timeline",
-    source_info: { name: "AP News" },
-    published_on: Date.now() / 1000 - 340,
-  },
-  {
-    id: "3",
-    title: "New Web3 Protocol Aims to Revolutionize Decentralized Identity",
-    source_info: { name: "CoinTelegraph" },
-    published_on: Date.now() / 1000 - 800,
-  },
-  {
-    id: "4",
-    title: "Global Markets React to Latest Federal Reserve Interest Rate Decision",
-    source_info: { name: "Reuters" },
-    published_on: Date.now() / 1000 - 1200,
-  },
-  {
-    id: "5",
-    title: "Major Exchange Reports Record Trading Volumes in Q1",
-    source_info: { name: "CoinDesk" },
-    published_on: Date.now() / 1000 - 1500,
-  },
-  {
-    id: "6",
-    title: "Regulatory Clarity Expected in Upcoming EU Crypto Framework",
-    source_info: { name: "Coinglass" },
-    published_on: Date.now() / 1000 - 2100,
-  },
-  {
-    id: "7",
-    title: "DeFi Total Value Locked Reaches New All-Time High",
-    source_info: { name: "DefiLlama" },
-    published_on: Date.now() / 1000 - 2500,
-  },
-  {
-    id: "8",
-    title: "Central Banks Explore Interoperability for Cross-Border CBDC Payments",
-    source_info: { name: "Financial Times" },
-    published_on: Date.now() / 1000 - 3200,
-  },
-  {
-    id: "9",
-    title: "AI Tokens Rally as Tech Giants Announce Blockchain Integrations",
-    source_info: { name: "Decrypt" },
-    published_on: Date.now() / 1000 - 3600,
-  },
-  {
-    id: "10",
-    title: "Layer 2 Networks See Massive Inflow of Stablecoins",
-    source_info: { name: "The Block" },
-    published_on: Date.now() / 1000 - 4200,
-  },
-  {
-    id: "11",
-    title: "Institutional Investors Shift Focus to Real World Asset Tokenization",
-    source_info: { name: "Blockworks" },
-    published_on: Date.now() / 1000 - 4800,
-  },
-  {
-    id: "12",
-    title: "GameFi Sector Rebounds with Launch of AAA Web3 Titles",
-    source_info: { name: "VentureBeat" },
-    published_on: Date.now() / 1000 - 5400,
-  }
+  { id: "m1", title: "Bitcoin Hits New All-Time High Above $152,000 Following Institutional ETF Inflows", source_info: { name: "CRYPTONEWS DAILY" }, published_on: Math.floor(Date.now() / 1000) - 3600 },
+  { id: "m2", title: "Ethereum Network Usage Surges Post-Prague Upgrade Completion", source_info: { name: "THE BLOCKCHAIN REPORT" }, published_on: Math.floor(Date.now() / 1000) - 7200 },
+  { id: "m3", title: "SEC Formally Approves First Spot Solana ETF for Public Trading", source_info: { name: "FINANCIAL TIMES DIGITAL" }, published_on: Math.floor(Date.now() / 1000) - 10800 },
+  { id: "m4", title: "Global Crypto Adoption Reaches 1 Billion Users Milestone", source_info: { name: "REUTERS TECH" }, published_on: Math.floor(Date.now() / 1000) - 14400 },
+  { id: "m5", title: "Major Central Banks Explore Interoperable CBDC Framework", source_info: { name: "BLOOMBERG TERMINAL" }, published_on: Math.floor(Date.now() / 1000) - 18000 }
 ];
 
 const MOCK_NEWS_ZH: NewsItem[] = [
-  {
-    id: "zh1",
-    title: "比特币突破70,000美元大关，全球机构采用率持续加速",
-    source_info: { name: "彭博社" },
-    published_on: Date.now() / 1000 - 120,
-  },
-  {
-    id: "zh2",
-    title: "以太坊基金会公布下一次重大网络升级时间表",
-    source_info: { name: "美联社" },
-    published_on: Date.now() / 1000 - 340,
-  },
-  {
-    id: "zh3",
-    title: "美联储最新利率决议引发全球市场剧烈波动",
-    source_info: { name: "金十数据" },
-    published_on: Date.now() / 1000 - 800,
-  },
-  {
-    id: "zh4",
-    title: "全新Web3协议旨在彻底改变去中心化身份验证",
-    source_info: { name: "律动 BlockBeats" },
-    published_on: Date.now() / 1000 - 1200,
-  },
-  {
-    id: "zh5",
-    title: "主流加密货币交易所第一季度交易量创下历史新高",
-    source_info: { name: "Coinglass" },
-    published_on: Date.now() / 1000 - 1500,
-  },
-  {
-    id: "zh6",
-    title: "欧盟即将出台的加密货币框架有望带来监管清晰度",
-    source_info: { name: "Foresight News" },
-    published_on: Date.now() / 1000 - 2100,
-  },
-  {
-    id: "zh7",
-    title: "多国央行探讨数字货币(CBDC)跨境支付互操作性",
-    source_info: { name: "华尔街见闻" },
-    published_on: Date.now() / 1000 - 2800,
-  },
-  {
-    id: "zh8",
-    title: "Layer 2 扩容方案总锁仓量突破新高，生态持续繁荣",
-    source_info: { name: "Odaily 星球日报" },
-    published_on: Date.now() / 1000 - 3500,
-  },
-  {
-    id: "zh9",
-    title: "科技巨头宣布区块链整合计划，AI概念代币集体大涨",
-    source_info: { name: "链闻 ChainNews" },
-    published_on: Date.now() / 1000 - 3600,
-  },
-  {
-    id: "zh10",
-    title: "稳定币大规模流入Layer 2网络，链上活跃度激增",
-    source_info: { name: "吴说区块链" },
-    published_on: Date.now() / 1000 - 4200,
-  },
-  {
-    id: "zh11",
-    title: "机构投资者将目光转向现实世界资产(RWA)代币化",
-    source_info: { name: "PANews" },
-    published_on: Date.now() / 1000 - 4800,
-  },
-  {
-    id: "zh12",
-    title: "3A级Web3游戏大作发布，GameFi板块迎来强势反弹",
-    source_info: { name: "深潮 TechFlow" },
-    published_on: Date.now() / 1000 - 5400,
-  }
+  { id: "m1", title: "比特币在机构 ETF 流入后突破 152,000 美元，创下历史新高", source_info: { name: "加密新闻日报" }, published_on: Math.floor(Date.now() / 1000) - 3600 },
+  { id: "m2", title: "布拉格升级完成后，以太坊网络使用量激增", source_info: { name: "区块链报告" }, published_on: Math.floor(Date.now() / 1000) - 7200 },
+  { id: "m3", title: "美国 SEC 正式批准首个现货 Solana ETF 上市交易", source_info: { name: "金融时报数字版" }, published_on: Math.floor(Date.now() / 1000) - 10800 },
+  { id: "m4", title: "全球加密货币采用量达到 10 亿用户里程碑", source_info: { name: "路透科技" }, published_on: Math.floor(Date.now() / 1000) - 14400 },
+  { id: "m5", title: "主要央行探索互操作性 CBDC 框架", source_info: { name: "彭博终端" }, published_on: Math.floor(Date.now() / 1000) - 18000 }
 ];
