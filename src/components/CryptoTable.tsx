@@ -41,13 +41,24 @@ export function CryptoTable({ onSelectCoin, category, lang }: { onSelectCoin: (c
         const res = await fetch(
           `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=24h${categoryParam}`
         );
-        if (!res.ok) throw new Error("Rate limit or error");
+        if (!res.ok) {
+          if (res.status === 429) {
+            console.warn("CoinGecko rate limit reached, using fallback data.");
+          } else {
+            console.warn(`CoinGecko API error (${res.status}), using fallback data.`);
+          }
+          if (isMounted) setCoins(getMockCoins(category));
+          return;
+        }
         const data = await res.json();
         if (!Array.isArray(data)) throw new Error("Invalid data format");
         if (isMounted) setCoins(data);
       } catch (error) {
-        console.error("Failed to fetch coins", error);
-        if (isMounted) setCoins(getMockCoins(category)); // Fallback
+        // Only log if it's not a standard fetch failure (which we handle above)
+        if (error instanceof Error && error.message !== "Rate limit or error") {
+          console.warn("Coin data fetch unavailable, using fallback.");
+        }
+        if (isMounted) setCoins(getMockCoins(category));
       } finally {
         if (isInitial && isMounted) setLoading(false);
       }

@@ -23,7 +23,11 @@ export function MainChart({ coinId, coinSymbol, lang }: MainChartProps) {
         const symbolUpper = coinSymbol.toUpperCase();
         // Try Binance API for 1-minute real-time data
         const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbolUpper}USDT&interval=1m&limit=60`);
-        if (!res.ok) throw new Error("Binance API failed");
+        if (!res.ok) {
+          console.warn(`Binance API unavailable (${res.status}), using dynamic mock.`);
+          handleMockUpdate();
+          return;
+        }
         const json = await res.json();
         
         const formattedData = json.map((item: any) => {
@@ -42,30 +46,33 @@ export function MainChart({ coinId, coinSymbol, lang }: MainChartProps) {
           setLoading(false);
         }
       } catch (error) {
-        console.error("Failed to fetch OHLC data, using dynamic mock", error);
-        // Dynamic Mock for real-time simulation if API fails (e.g., CORS or unsupported pair)
-        if (dataRef.current.length === 0) {
-          const mock = generateMockData();
-          if (isMounted) {
-            setData(mock);
-            dataRef.current = mock;
-            setLoading(false);
-          }
-        } else {
-          // Update last candle or add new one
-          const last = { ...dataRef.current[dataRef.current.length - 1] };
-          const change = (Math.random() - 0.5) * (last.close * 0.002);
-          last.close += change;
-          last.high = Math.max(last.high, last.close);
-          last.low = Math.min(last.low, last.close);
-          last.isPositive = last.close >= last.open;
-          last.value = [last.low, last.high];
-          
-          const newData = [...dataRef.current.slice(0, -1), last];
-          if (isMounted) {
-            setData(newData);
-            dataRef.current = newData;
-          }
+        handleMockUpdate();
+      }
+    };
+
+    const handleMockUpdate = () => {
+      // Dynamic Mock for real-time simulation if API fails (e.g., CORS or unsupported pair)
+      if (dataRef.current.length === 0) {
+        const mock = generateMockData();
+        if (isMounted) {
+          setData(mock);
+          dataRef.current = mock;
+          setLoading(false);
+        }
+      } else {
+        // Update last candle or add new one
+        const last = { ...dataRef.current[dataRef.current.length - 1] };
+        const change = (Math.random() - 0.5) * (last.close * 0.002);
+        last.close += change;
+        last.high = Math.max(last.high, last.close);
+        last.low = Math.min(last.low, last.close);
+        last.isPositive = last.close >= last.open;
+        last.value = [last.low, last.high];
+        
+        const newData = [...dataRef.current.slice(0, -1), last];
+        if (isMounted) {
+          setData(newData);
+          dataRef.current = newData;
         }
       }
     };

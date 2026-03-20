@@ -19,31 +19,7 @@ export function Navbar({ lang, setLang }: { lang: Language; setLang: (l: Languag
   };
 
   return (
-    <nav className="sticky top-0 z-50 w-full border-b border-white/10 bg-[#050505]/80 backdrop-blur-xl overflow-hidden">
-      {/* Background Scanning Line */}
-      <motion.div 
-        animate={{ left: ["-100%", "100%"] }}
-        transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-        className="absolute bottom-0 h-[1px] w-full bg-gradient-to-r from-transparent via-[#00ff66]/40 to-transparent z-0 pointer-events-none"
-      />
-
-      {/* Toast Notification */}
-      <AnimatePresence>
-        {toastMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -50, x: "-50%" }}
-            animate={{ opacity: 1, y: 16, x: "-50%" }}
-            exit={{ opacity: 0, y: -50, x: "-50%" }}
-            className="fixed left-1/2 z-[100] rounded-none border border-[#00ff66]/50 bg-[#050505] px-6 py-3 text-xs font-mono font-bold text-[#00ff66] shadow-[0_0_20px_rgba(0,255,102,0.2)] uppercase tracking-widest"
-          >
-            <div className="flex items-center gap-3">
-              <div className="h-1.5 w-1.5 rounded-full bg-[#00ff66] animate-pulse" />
-              {toastMessage}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
+    <>
       {/* Share Modal */}
       <AnimatePresence>
         {showShareModal && (
@@ -78,21 +54,32 @@ export function Navbar({ lang, setLang }: { lang: Language; setLang: (l: Languag
                 <div className="h-[1px] w-12 bg-[#00ff66]/50" />
               </div>
 
-              <div className="relative p-4 bg-white group">
+              <div className="relative p-6 bg-white group shadow-[0_0_30px_rgba(255,255,255,0.1)]">
                 <div className="absolute inset-0 border-4 border-black/5 group-hover:border-[#00ff66]/10 transition-colors" />
-                <QRCodeSVG value={currentUrl} size={180} />
+                <QRCodeSVG 
+                  id="share-qr"
+                  value="https://max-market-station.vercel.app/" 
+                  size={200}
+                  level="H"
+                  includeMargin={false}
+                />
+                <div className="mt-4 text-center">
+                  <span className="text-[10px] font-mono text-black/40 uppercase font-bold tracking-tighter">
+                    Long Press to Save QR
+                  </span>
+                </div>
               </div>
 
               <div className="flex flex-col items-center gap-4 w-full">
                 <div className="w-full bg-white/5 p-3 border border-white/5 font-mono text-[10px] text-white/40 truncate text-center">
-                  {currentUrl}
+                  https://max-market-station.vercel.app/
                 </div>
                 <button 
                   onClick={() => {
-                    navigator.clipboard.writeText(currentUrl);
+                    navigator.clipboard.writeText("https://max-market-station.vercel.app/");
                     showToast(lang === 'zh' ? '链接已复制' : 'Link copied');
                   }}
-                  className="w-full py-3 bg-[#00ff66] text-black font-mono font-black text-xs uppercase tracking-widest hover:bg-[#00cc52] transition-all"
+                  className="w-full py-3 bg-[#00ff66] text-black font-mono font-black text-xs uppercase tracking-widest hover:bg-[#00cc52] transition-all shadow-[0_0_15px_rgba(0,255,102,0.3)]"
                 >
                   Copy_Access_Key
                 </button>
@@ -102,7 +89,32 @@ export function Navbar({ lang, setLang }: { lang: Language; setLang: (l: Languag
         )}
       </AnimatePresence>
 
-      <div className="flex h-16 items-center justify-between px-4 md:px-10 relative z-10">
+      <nav className="sticky top-0 z-50 w-full border-b border-white/10 bg-[#050505]/80 backdrop-blur-xl overflow-hidden">
+        {/* Background Scanning Line */}
+        <motion.div 
+          animate={{ left: ["-100%", "100%"] }}
+          transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
+          className="absolute bottom-0 h-[1px] w-full bg-gradient-to-r from-transparent via-[#00ff66]/40 to-transparent z-0 pointer-events-none"
+        />
+
+        {/* Toast Notification */}
+        <AnimatePresence>
+          {toastMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: -50, x: "-50%" }}
+              animate={{ opacity: 1, y: 16, x: "-50%" }}
+              exit={{ opacity: 0, y: -50, x: "-50%" }}
+              className="fixed left-1/2 z-[100] rounded-none border border-[#00ff66]/50 bg-[#050505] px-6 py-3 text-xs font-mono font-bold text-[#00ff66] shadow-[0_0_20px_rgba(0,255,102,0.2)] uppercase tracking-widest"
+            >
+              <div className="flex items-center gap-3">
+                <div className="h-1.5 w-1.5 rounded-full bg-[#00ff66] animate-pulse" />
+                {toastMessage}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="flex h-16 items-center justify-between px-4 md:px-10 relative z-10">
         <div className="flex items-center gap-4">
           <motion.div 
             initial={{ opacity: 0, x: -20 }}
@@ -127,8 +139,8 @@ export function Navbar({ lang, setLang }: { lang: Language; setLang: (l: Languag
         </div>
 
         <div className="hidden md:flex items-center gap-10">
-          <NavLink href="#" active>{t.markets}</NavLink>
-          <NavLink href="#">{t.news}</NavLink>
+          <NavLink href="#markets-section" active>{t.markets}</NavLink>
+          <NavLink href="#news-section">{t.news}</NavLink>
         </div>
 
         <div className="flex items-center gap-2 sm:gap-4">
@@ -182,20 +194,33 @@ export function Navbar({ lang, setLang }: { lang: Language; setLang: (l: Languag
             className="md:hidden border-t border-white/10 bg-[#050505] overflow-hidden"
           >
             <div className="flex flex-col px-6 py-8 gap-6">
-              <NavLink href="#" active>{t.markets}</NavLink>
-              <NavLink href="#">{t.news}</NavLink>
+              <NavLink href="#markets-section" active>{t.markets}</NavLink>
+              <NavLink href="#news-section">{t.news}</NavLink>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
     </nav>
+    </>
   );
 }
 
 function NavLink({ href, children, active }: { href: string; children: React.ReactNode; active?: boolean }) {
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (href.startsWith('#')) {
+      e.preventDefault();
+      const id = href.substring(1);
+      const element = document.getElementById(id);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+  };
+
   return (
     <a 
       href={href} 
+      onClick={handleClick}
       className={`text-sm font-medium uppercase tracking-wider transition-colors ${active ? 'text-white' : 'text-white/50 hover:text-white'}`}
     >
       {children}
